@@ -126,10 +126,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     return nullptr;
   }
   if (with_native_shader_support && !supported_features.depthClamp) {
+    // The renderer skips the draws that need it (depth-clamp-unsupported) and
+    // drops the recipes that request it, so a driver without the feature loses
+    // depth clamping on those draws instead of the whole device.
     REXLOG_WARN(
-        "Vulkan device '{}' doesn't support depthClamp required by Liberty native rendering",
+        "Vulkan device '{}' lacks depthClamp; draws requiring depth clamping will be skipped",
         properties.deviceName);
-    return nullptr;
   }
   if (with_native_shader_support && !supported_features.shaderClipDistance) {
     // Shaders are rewritten at load (util::StripSpirvClipDistance) so user clip
@@ -523,17 +525,35 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
   }
 
+  if (with_native_shader_support && !features_1_2.supported.bufferDeviceAddress) {
+    REXLOG_WARN(
+        "Vulkan device '{}' doesn't support bufferDeviceAddress required by Liberty native shaders",
+        properties.deviceName);
+    return nullptr;
+  }
   if (with_native_shader_support &&
       (!features_1_2.supported.runtimeDescriptorArray ||
-       !features_1_2.supported.descriptorBindingPartiallyBound ||
-       !features_1_2.supported.bufferDeviceAddress)) {
+       !features_1_2.supported.descriptorBindingPartiallyBound)) {
+    // Descriptor indexing is unavailable, so the renderer cannot use its
+    // bindless table: it falls back to the cached backend, which binds
+    // fixed-size descriptor arrays and writes every descriptor before each
+    // draw. That needs the shaders' runtime descriptor arrays rewritten to
+    // fixed arrays (FixSpirvRuntimeDescriptorArrays in gta4_native), which the
+    // title shaders index dynamically.
+    if (!supported_features.shaderSampledImageArrayDynamicIndexing) {
+      REXLOG_WARN(
+          "Vulkan device '{}' lacks descriptor indexing (runtimeDescriptorArray={}, "
+          "descriptorBindingPartiallyBound={}) and shaderSampledImageArrayDynamicIndexing, "
+          "so its fixed-size descriptor arrays could not be indexed by the title shaders",
+          properties.deviceName, features_1_2.supported.runtimeDescriptorArray != VK_FALSE,
+          features_1_2.supported.descriptorBindingPartiallyBound != VK_FALSE);
+      return nullptr;
+    }
     REXLOG_WARN(
-        "Vulkan device '{}' lacks native shader features: runtimeDescriptorArray={}, "
-        "descriptorBindingPartiallyBound={}, bufferDeviceAddress={}",
+        "Vulkan device '{}' lacks descriptor indexing (runtimeDescriptorArray={}, "
+        "descriptorBindingPartiallyBound={}); using fixed-size descriptor arrays",
         properties.deviceName, features_1_2.supported.runtimeDescriptorArray != VK_FALSE,
-        features_1_2.supported.descriptorBindingPartiallyBound != VK_FALSE,
-        features_1_2.supported.bufferDeviceAddress != VK_FALSE);
-    return nullptr;
+        features_1_2.supported.descriptorBindingPartiallyBound != VK_FALSE);
   }
   if (with_dynamic_rendering) {
     const bool dynamic_rendering_supported =
@@ -873,6 +893,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     XE_UI_VULKAN_FEATURE(shaderStorageImageExtendedFormats)
     XE_UI_VULKAN_FEATURE(shaderStorageImageReadWithoutFormat)
     XE_UI_VULKAN_FEATURE(shaderStorageImageWriteWithoutFormat)
+    // Needed when the driver has no runtimeDescriptorArray: the title shaders'
+    // heaps become fixed-size arrays that they still index dynamically.
+    XE_UI_VULKAN_FEATURE(shaderSampledImageArrayDynamicIndexing)
+    XE_UI_VULKAN_FEATURE(shaderUniformBufferArrayDynamicIndexing)
   }
 
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {

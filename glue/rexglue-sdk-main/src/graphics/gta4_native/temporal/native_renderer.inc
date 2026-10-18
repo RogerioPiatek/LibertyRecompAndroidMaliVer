@@ -68,6 +68,13 @@ VkShaderModule Gta4NativeGraphicsSystem::GetTemporalShaderModule(
   if (words.empty()) return VK_NULL_HANDLE;
   std::vector<uint32_t> module(words.begin(), words.end());
   RemapSpirvDrawDescriptorSets(module);
+  auto* provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+  if (provider->vulkan_device() &&
+      !provider->vulkan_device()->properties().runtimeDescriptorArray) {
+    FixSpirvRuntimeDescriptorArrays(
+        module, native_descriptor_capacity_ ? native_descriptor_capacity_
+                                           : kNativeFixedDescriptorArrayCapacity);
+  }
   if (REXCVAR_GET(gta4_native_loop_watchdog)) {
     if (auto guarded = AddSpirvLoopWatchdog(module, 16384)) module = std::move(guarded->words);
   }
@@ -80,7 +87,6 @@ VkShaderModule Gta4NativeGraphicsSystem::GetTemporalShaderModule(
     }
     module = std::move(*transformed);
   }
-  auto* provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
   const auto handle = ui::vulkan::util::CreateShaderModule(provider->vulkan_device(),
       module.data(), module.size() * sizeof(uint32_t));
   if (handle) temporal_shader_modules_.emplace(key, handle);

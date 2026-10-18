@@ -193,19 +193,43 @@ bool ProbeSystemIdentity(std::string& identity) {
   return found;
 }
 
+// Whether the physical device advertises a device extension.
+bool HasDeviceExtension(VkInstance instance, VkPhysicalDevice device, const char* name) {
+  const auto enumerate = Get<PFN_vkEnumerateDeviceExtensionProperties>(
+      instance, "vkEnumerateDeviceExtensionProperties");
+  if (!enumerate) return false;
+  uint32_t count = 0;
+  if (enumerate(device, nullptr, &count, nullptr) != VK_SUCCESS || count == 0) return false;
+  std::vector<VkExtensionProperties> extensions(count);
+  if (enumerate(device, nullptr, &count, extensions.data()) != VK_SUCCESS) return false;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (std::strcmp(extensions[i].extensionName, name) == 0) return true;
+  }
+  return false;
+}
+
 // The capabilities the native renderer refuses to start without; the check
 // that enforces them is in ui/vulkan/vulkan_device.cpp (with_native_shader_support).
 // Reported per device so that a GPU lacking one - an unfamiliar vendor driver,
 // say - produces a readable message on the launcher instead of a renderer that
 // fails inside the game. Each value is 1 (present), 0 (absent) or -1 (could not
 // be queried); only an explicit 0 is ever treated as a problem.
+//
+// A driver without descriptor indexing (runtimeDescriptorArray /
+// descriptorBindingPartiallyBound) can still run: the renderer falls back to
+// fixed-size descriptor arrays, which needs
+// shaderSampledImageArrayDynamicIndexing, and the native backend always needs
+// dynamic rendering. Both are reported so the launcher can tell a degraded
+// device from an unusable one.
 std::string CapabilityJson(VkInstance instance, VkPhysicalDevice device, uint32_t requested_api,
                            uint32_t device_api) {
   const auto features = Get<PFN_vkGetPhysicalDeviceFeatures>(instance, "vkGetPhysicalDeviceFeatures");
   const auto features2 = Get<PFN_vkGetPhysicalDeviceFeatures2>(instance, "vkGetPhysicalDeviceFeatures2");
   auto flag = [](int value) { return std::to_string(value); };
   int int64 = -1, clamp = -1, clip = -1, sample_rate = -1, blend = -1;
-  int runtime_array = -1, partially_bound = -1, device_address = -1;
+  int sampled_indexing = -1, uniform_indexing = -1, storage_indexing = -1;
+  int runtime_array = -1, partially_bound = -1, device_address = -1, descriptor_indexing = -1;
+  int dynamic_rendering = -1, depth_clip = -1;
   if (features) {
     VkPhysicalDeviceFeatures base{};
     features(device, &base);
@@ -214,6 +238,11 @@ std::string CapabilityJson(VkInstance instance, VkPhysicalDevice device, uint32_
     clip = base.shaderClipDistance ? 1 : 0;
     sample_rate = base.sampleRateShading ? 1 : 0;
     blend = base.independentBlend ? 1 : 0;
+    // The replacement for descriptor indexing when the title shaders' heaps are
+    // rewritten to fixed-size arrays that they still index dynamically.
+    sampled_indexing = base.shaderSampledImageArrayDynamicIndexing ? 1 : 0;
+    uniform_indexing = base.shaderUniformBufferArrayDynamicIndexing ? 1 : 0;
+    storage_indexing = base.shaderStorageBufferArrayDynamicIndexing ? 1 : 0;
   }
   if (features2 && requested_api >= VK_API_VERSION_1_2 && device_api >= VK_API_VERSION_1_2) {
     VkPhysicalDeviceVulkan12Features v12{};
@@ -225,12 +254,59 @@ std::string CapabilityJson(VkInstance instance, VkPhysicalDevice device, uint32_
     runtime_array = v12.runtimeDescriptorArray ? 1 : 0;
     partially_bound = v12.descriptorBindingPartiallyBound ? 1 : 0;
     device_address = v12.bufferDeviceAddress ? 1 : 0;
+    descriptor_indexing = v12.descriptorIndexing ? 1 : 0;
+  }
+  // Dynamic rendering and depth clip control come from an extension or from
+  // core Vulkan 1.3, so the feature struct only means something when the
+  // extension is advertised (or the API version already includes it).
+  if (features2) {
+#if defined(VK_API_VERSION_1_3) && defined(VK_KHR_dynamic_rendering)
+    if (device_api >= VK_API_VERSION_1_3 ||
+        HasDeviceExtension(instance, device, "VK_KHR_dynamic_rendering")) {
+      if (device_api >= VK_API_VERSION_1_3) {
+#if defined(VK_VERSION_1_3)
+        VkPhysicalDeviceVulkan13Features v13{};
+        v13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        VkPhysicalDeviceFeatures2 extended{};
+        extended.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        extended.pNext = &v13;
+        features2(device, &extended);
+        dynamic_rendering = v13.dynamicRendering ? 1 : 0;
+#endif
+      } else {
+        VkPhysicalDeviceDynamicRenderingFeaturesKHR dr{};
+        dr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+        VkPhysicalDeviceFeatures2 extended{};
+        extended.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        extended.pNext = &dr;
+        features2(device, &extended);
+        dynamic_rendering = dr.dynamicRendering ? 1 : 0;
+      }
+    }
+#endif
+#if defined(VK_EXT_depth_clip_control)
+    if (HasDeviceExtension(instance, device, "VK_EXT_depth_clip_control")) {
+      VkPhysicalDeviceDepthClipControlFeaturesEXT dc{};
+      dc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
+      VkPhysicalDeviceFeatures2 extended{};
+      extended.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+      extended.pNext = &dc;
+      features2(device, &extended);
+      depth_clip = dc.depthClipControl ? 1 : 0;
+    }
+#endif
   }
   return "{\"shaderInt64\":" + flag(int64) + ",\"depthClamp\":" + flag(clamp) +
          ",\"shaderClipDistance\":" + flag(clip) + ",\"sampleRateShading\":" + flag(sample_rate) +
          ",\"independentBlend\":" + flag(blend) + ",\"runtimeDescriptorArray\":" + flag(runtime_array) +
          ",\"descriptorBindingPartiallyBound\":" + flag(partially_bound) +
-         ",\"bufferDeviceAddress\":" + flag(device_address) + "}";
+         ",\"bufferDeviceAddress\":" + flag(device_address) +
+         ",\"shaderSampledImageArrayDynamicIndexing\":" + flag(sampled_indexing) +
+         ",\"shaderUniformBufferArrayDynamicIndexing\":" + flag(uniform_indexing) +
+         ",\"shaderStorageBufferArrayDynamicIndexing\":" + flag(storage_indexing) +
+         ",\"descriptorIndexing\":" + flag(descriptor_indexing) +
+         ",\"dynamicRendering\":" + flag(dynamic_rendering) +
+         ",\"depthClipControl\":" + flag(depth_clip) + "}";
 }
 
 // Uses only functions from the selected loader, never this proxy's exports.

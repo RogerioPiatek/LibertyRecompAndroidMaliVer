@@ -38,6 +38,31 @@ explicitly lacks one now gets a dialog naming it, instead of a renderer that fai
 The values are in `files/last_launch.txt` under `driver status:` (`1` present, `0` missing, `-1`
 could not be queried).
 
+## Drivers without descriptor indexing
+
+`runtimeDescriptorArray` and `descriptorBindingPartiallyBound` have a fallback, so they no longer
+stop the game. The renderer's **cached descriptor backend** binds each texture and sampler heap as
+a fixed-size array of `kTextureStageCount` (26) descriptors and writes every entry before the draw,
+which is what `descriptorBindingPartiallyBound` would otherwise allow it to skip. The two things
+that used to block that path are handled here:
+
+- The device is no longer rejected for lacking `depthClamp` (draws that need depth clamping are
+  skipped with `depth-clamp-unsupported`) or descriptor indexing.
+- The title shaders declare their heaps as *runtime* descriptor arrays, which a driver without
+  `runtimeDescriptorArray` rejects in `vkCreateShaderModule` even though the layout is fixed. They
+  are rewritten at load (`native_spirv_descriptor_array_fixup.h`, in the same place
+  `StripSpirvClipDistance` patches clip distances) into `OpTypeArray` of 26, and the
+  `RuntimeDescriptorArray` capability is dropped.
+
+That rewrite needs `shaderSampledImageArrayDynamicIndexing`, because the title shaders still index
+the heaps with a runtime (dynamically uniform) index. It is now reported and enabled;
+`shaderUniformBufferArrayDynamicIndexing` is enabled with it. The report also gained
+`shaderSampledImageArrayDynamicIndexing`, `shaderUniformBufferArrayDynamicIndexing`,
+`shaderStorageBufferArrayDynamicIndexing`, `descriptorIndexing`, `dynamicRendering` and
+`depthClipControl`, and the launcher's block list is now graduated: only `shaderInt64`,
+`sampleRateShading`, `independentBlend`, `bufferDeviceAddress` and `dynamicRendering` (plus
+`shaderSampledImageArrayDynamicIndexing` when descriptor indexing is absent) stop the game.
+
 ## Building
 
 Same steps as [BUILDING.md](BUILDING.md); only the packaging step differs:

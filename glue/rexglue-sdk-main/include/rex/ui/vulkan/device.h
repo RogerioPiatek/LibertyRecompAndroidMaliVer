@@ -146,6 +146,8 @@ class VulkanDevice {
     bool shaderStorageImageExtendedFormats = false;
     bool shaderStorageImageReadWithoutFormat = false;
     bool shaderStorageImageWriteWithoutFormat = false;
+    bool shaderSampledImageArrayDynamicIndexing = false;
+    bool shaderUniformBufferArrayDynamicIndexing = false;
 
     // Vulkan 1.2 features used by Liberty's precompiled native shader cache.
     bool runtimeDescriptorArray = false;

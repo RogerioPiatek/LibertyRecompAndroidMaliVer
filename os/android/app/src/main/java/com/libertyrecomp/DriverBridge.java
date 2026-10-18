@@ -136,28 +136,45 @@ final class DriverBridge {
         return status;
     }
 
-    /** Renderer-required Vulkan features, in the order the report names them. */
+    /**
+     * Features the renderer cannot start without on any driver. A driver that
+     * only lacks depthClamp or descriptor indexing still runs: the draws that
+     * need depth clamping are skipped, and the title shaders' descriptor heaps
+     * are bound as fixed-size arrays (which then needs
+     * shaderSampledImageArrayDynamicIndexing). Those are handled separately in
+     * {@link #missingFeatures}.
+     */
     private static final String[] REQUIRED_FEATURES = {
-            "shaderInt64", "depthClamp", "sampleRateShading",
-            "independentBlend", "runtimeDescriptorArray", "descriptorBindingPartiallyBound",
-            "bufferDeviceAddress",
+            "shaderInt64", "sampleRateShading", "independentBlend", "bufferDeviceAddress",
+            "dynamicRendering",
     };
 
     /**
-     * Names of required features the driver explicitly reports as absent
-     * (value 0). A feature that could not be queried (-1) or a status without
-     * the block at all counts as present: the renderer makes the final check.
+     * Names of the features the driver explicitly reports as absent (value 0)
+     * and that nothing else stands in for. A feature that could not be queried
+     * (-1) or a status without the block at all counts as present: the renderer
+     * makes the final check.
      */
     private static String missingFeatures(JSONObject features) {
         if (features == null) return "";
         StringBuilder missing = new StringBuilder();
         for (String feature : REQUIRED_FEATURES) {
-            if (features.optInt(feature, -1) == 0) {
-                if (missing.length() > 0) missing.append(", ");
-                missing.append(feature);
-            }
+            appendMissing(missing, features, feature);
+        }
+        // Without descriptor indexing the heaps become fixed-size arrays that
+        // the title shaders still index dynamically.
+        if (features.optInt("runtimeDescriptorArray", 1) == 0
+                || features.optInt("descriptorBindingPartiallyBound", 1) == 0) {
+            appendMissing(missing, features, "shaderSampledImageArrayDynamicIndexing");
         }
         return missing.toString();
+    }
+
+    private static void appendMissing(StringBuilder missing, JSONObject features, String feature) {
+        if (features.optInt(feature, -1) == 0) {
+            if (missing.length() > 0) missing.append(", ");
+            missing.append(feature);
+        }
     }
 
     /**

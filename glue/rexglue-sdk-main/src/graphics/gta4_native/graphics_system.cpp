@@ -10,6 +10,7 @@
 #include "native_pipeline_stats.h"
 #include "native_gpu_counters.h"
 #include "native_spirv_descriptor_remap.h"
+#include "native_spirv_descriptor_array_fixup.h"
 #include "native_bc_decode.h"
 #include "native_spirv_loop_watchdog.h"
 #include "native_spirv_legacy_mul.h"
@@ -1852,6 +1853,9 @@ constexpr uint32_t kNativeIndexedMinimumTextureCapacity = kShaderTextureCount + 
 constexpr uint32_t kNativeIndexedMinimumSamplerCapacity = kShaderTextureCount + 1;
 static_assert(kNativeIndexedImageDescriptorSetCount + 1 == kDrawTextureBindingCount);
 static_assert(kNativeMergedStorageSet + 1 == kDescriptorSetCount);
+// The fixed descriptor arrays the title shaders declare when descriptor
+// indexing is unavailable must match the cached layout's descriptorCount.
+static_assert(kShaderTextureCount == kNativeFixedDescriptorArrayCapacity);
 constexpr uint32_t kTextureFetchBase = 0x480;
 constexpr uint32_t kTextureFetchSize = 0x18;
 constexpr uint32_t kTextureHandleBase = 0x30F8;
@@ -8368,6 +8372,28 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
       apply_relaxed(stock_late_spirv);
       stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
     }
+    // Without descriptor indexing the cached backend binds fixed-size arrays,
+    // so the title shaders' runtime descriptor arrays have to match. This runs
+    // last: it adds a type and a constant that the passes above would have had
+    // to walk through.
+    if (!vulkan_device->properties().runtimeDescriptorArray) {
+      const uint32_t fixed_capacity = native_descriptor_capacity_
+          ? native_descriptor_capacity_ : kNativeFixedDescriptorArrayCapacity;
+      const SpirvDescriptorArrayFixup early_fixup =
+          FixSpirvRuntimeDescriptorArrays(stock_early_spirv, fixed_capacity);
+      const SpirvDescriptorArrayFixup late_fixup = stock_late_spirv.empty()
+          ? SpirvDescriptorArrayFixup{}
+          : FixSpirvRuntimeDescriptorArrays(stock_late_spirv, fixed_capacity);
+      if (early_fixup.changed() || late_fixup.changed()) {
+        stock_early_spirv_size = stock_early_spirv.size() * sizeof(uint32_t);
+        if (!stock_late_spirv.empty())
+          stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
+        REXLOG_INFO(
+            "gta4-native: shader {} descriptor arrays fixed to {}: early={} late={} skipped={}",
+            cache_entry->filename, fixed_capacity, early_fixup.arrays_rewritten,
+            late_fixup.arrays_rewritten, early_fixup.arrays_skipped);
+      }
+    }
     VkShaderModule stock_early_module = ui::vulkan::util::CreateShaderModule(
         vulkan_device, stock_early_spirv.data(), stock_early_spirv_size);
     if (!stock_early_module) {
@@ -8571,6 +8597,21 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         apply_ubo_constants(override_late_spirv);
         apply_relaxed(override_early_spirv);
         apply_relaxed(override_late_spirv);
+        if (!vulkan_device->properties().runtimeDescriptorArray) {
+          const uint32_t fixed_capacity = native_descriptor_capacity_
+              ? native_descriptor_capacity_ : kNativeFixedDescriptorArrayCapacity;
+          const SpirvDescriptorArrayFixup early_fixup =
+              FixSpirvRuntimeDescriptorArrays(override_early_spirv, fixed_capacity);
+          const SpirvDescriptorArrayFixup late_fixup = override_late_spirv.empty()
+              ? SpirvDescriptorArrayFixup{}
+              : FixSpirvRuntimeDescriptorArrays(override_late_spirv, fixed_capacity);
+          if (early_fixup.changed() || late_fixup.changed()) {
+            REXLOG_INFO(
+                "gta4-native: override shader {} descriptor arrays fixed to {}: early={} late={}",
+                resource->filename, fixed_capacity, early_fixup.arrays_rewritten,
+                late_fixup.arrays_rewritten);
+          }
+        }
         const size_t effective_early_size = override_early_spirv.size() * sizeof(uint32_t);
         const size_t effective_late_size = override_late_spirv.size() * sizeof(uint32_t);
         VkShaderModule override_early_module = ui::vulkan::util::CreateShaderModule(
@@ -15713,6 +15754,15 @@ bool Gta4NativeGraphicsSystem::CreateNativeDescriptors() {
   if (requested_backend == "indexed") {
     backend_request = NativeDescriptorBackendRequest::kIndexed;
   } else if (requested_backend == "cached") {
+    backend_request = NativeDescriptorBackendRequest::kCached;
+  }
+  // A device without descriptor indexing can only run the cached backend; an
+  // explicit request for the indexed one falls back instead of failing setup.
+  if (backend_request == NativeDescriptorBackendRequest::kIndexed &&
+      (!limits.runtimeDescriptorArray || !limits.descriptorBindingPartiallyBound)) {
+    REXLOG_WARN(
+        "gta4-native-descriptors: indexed backend requested, but the device lacks "
+        "runtimeDescriptorArray/descriptorBindingPartiallyBound; using the cached backend");
     backend_request = NativeDescriptorBackendRequest::kCached;
   }
 
