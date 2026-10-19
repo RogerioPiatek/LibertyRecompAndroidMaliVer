@@ -193,6 +193,21 @@ REXCVAR_DEFINE_BOOL(gta4_native_ubo_layout, true, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_BOOL(gta4_native_skip_attachment_barriers, false, "GTA IV/Graphics/Native Renderer",
                     "Skip attachment-to-same-attachment layout barriers between rendering scopes "
                     "(Turnip keeps draw order across scopes)");
+REXCVAR_DEFINE_BOOL(gta4_native_pipeline_semantics_log, false, "GTA IV/Diagnostics",
+                    "Log alpha-to-coverage pipeline semantics for every draw that requests them "
+                    "(one line per draw, megabytes per minute)");
+REXCVAR_DEFINE_BOOL(gta4_native_light_lineage_log, false, "GTA IV/Diagnostics",
+                    "Log every light-pass contribution rejected by the semantic lineage check "
+                    "(one line per draw, megabytes per minute)");
+REXCVAR_DEFINE_BOOL(gta4_native_strip_descriptor_indexing_extension, true, "GTA IV/Diagnostics",
+                    "Drop the SPV_EXT_descriptor_indexing declaration once the runtime descriptor "
+                    "arrays have been rewritten to fixed-size arrays");
+REXCVAR_DEFINE_UINT32(gta4_native_descriptor_capacity, kTextureStageCount,
+                      "GTA IV/Diagnostics",
+                      "Descriptor heaps bound by the cached backend (shader array size and "
+                      "descriptor set layout); lowers the per-stage resource budget for drivers "
+                      "with a small VkPhysicalDeviceLimits budget")
+    .range(1, kTextureStageCount);
 REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_trigger, 0, "GTA IV/Diagnostics",
                       "TEMP: changing this value starts one native profile capture");
 REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_delay_seconds, 0, "GTA IV/Diagnostics",
@@ -8379,19 +8394,22 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
     if (!vulkan_device->properties().runtimeDescriptorArray) {
       const uint32_t fixed_capacity = native_descriptor_capacity_
           ? native_descriptor_capacity_ : kNativeFixedDescriptorArrayCapacity;
+      const bool strip_extension = REXCVAR_GET(gta4_native_strip_descriptor_indexing_extension);
       const SpirvDescriptorArrayFixup early_fixup =
-          FixSpirvRuntimeDescriptorArrays(stock_early_spirv, fixed_capacity);
+          FixSpirvRuntimeDescriptorArrays(stock_early_spirv, fixed_capacity, strip_extension);
       const SpirvDescriptorArrayFixup late_fixup = stock_late_spirv.empty()
           ? SpirvDescriptorArrayFixup{}
-          : FixSpirvRuntimeDescriptorArrays(stock_late_spirv, fixed_capacity);
+          : FixSpirvRuntimeDescriptorArrays(stock_late_spirv, fixed_capacity, strip_extension);
       if (early_fixup.changed() || late_fixup.changed()) {
         stock_early_spirv_size = stock_early_spirv.size() * sizeof(uint32_t);
         if (!stock_late_spirv.empty())
           stock_late_spirv_size = stock_late_spirv.size() * sizeof(uint32_t);
         REXLOG_INFO(
-            "gta4-native: shader {} descriptor arrays fixed to {}: early={} late={} skipped={}",
+            "gta4-native: shader {} descriptor arrays fixed to {}: early={} late={} skipped={} "
+            "extension-dropped={}/{}",
             cache_entry->filename, fixed_capacity, early_fixup.arrays_rewritten,
-            late_fixup.arrays_rewritten, early_fixup.arrays_skipped);
+            late_fixup.arrays_rewritten, early_fixup.arrays_skipped,
+            early_fixup.dropped_extension, late_fixup.dropped_extension);
       }
     }
     VkShaderModule stock_early_module = ui::vulkan::util::CreateShaderModule(
@@ -8600,16 +8618,22 @@ void Gta4NativeGraphicsSystem::RegisterShader(const RegisterShaderCommand& comma
         if (!vulkan_device->properties().runtimeDescriptorArray) {
           const uint32_t fixed_capacity = native_descriptor_capacity_
               ? native_descriptor_capacity_ : kNativeFixedDescriptorArrayCapacity;
+          const bool strip_extension =
+              REXCVAR_GET(gta4_native_strip_descriptor_indexing_extension);
           const SpirvDescriptorArrayFixup early_fixup =
-              FixSpirvRuntimeDescriptorArrays(override_early_spirv, fixed_capacity);
+              FixSpirvRuntimeDescriptorArrays(override_early_spirv, fixed_capacity,
+                                              strip_extension);
           const SpirvDescriptorArrayFixup late_fixup = override_late_spirv.empty()
               ? SpirvDescriptorArrayFixup{}
-              : FixSpirvRuntimeDescriptorArrays(override_late_spirv, fixed_capacity);
+              : FixSpirvRuntimeDescriptorArrays(override_late_spirv, fixed_capacity,
+                                                strip_extension);
           if (early_fixup.changed() || late_fixup.changed()) {
             REXLOG_INFO(
-                "gta4-native: override shader {} descriptor arrays fixed to {}: early={} late={}",
+                "gta4-native: override shader {} descriptor arrays fixed to {}: early={} late={} "
+                "extension-dropped={}/{}",
                 resource->filename, fixed_capacity, early_fixup.arrays_rewritten,
-                late_fixup.arrays_rewritten);
+                late_fixup.arrays_rewritten, early_fixup.dropped_extension,
+                late_fixup.dropped_extension);
           }
         }
         const size_t effective_early_size = override_early_spirv.size() * sizeof(uint32_t);
@@ -15868,9 +15892,15 @@ bool Gta4NativeGraphicsSystem::CreateNativeDescriptors() {
   }
   native_descriptor_backend_ = policy.backend;
   const bool indexed = native_descriptor_backend_ == NativeDescriptorBackend::kIndexed;
+  // The cached backend's array size is both the shader array length and the
+  // descriptor set layout's descriptorCount, so a single knob keeps them in
+  // step. A driver whose per-stage budget is smaller than four heaps of
+  // kShaderTextureCount (plus the sampler heap) needs the smaller value.
+  const uint32_t cached_capacity =
+      std::clamp<uint32_t>(REXCVAR_GET(gta4_native_descriptor_capacity), 1, kShaderTextureCount);
   native_descriptor_capacity_ =
-      indexed ? indexed_capacity.sampled_images_per_set : kShaderTextureCount;
-  native_sampler_descriptor_capacity_ = indexed ? indexed_capacity.samplers : kShaderTextureCount;
+      indexed ? indexed_capacity.sampled_images_per_set : cached_capacity;
+  native_sampler_descriptor_capacity_ = indexed ? indexed_capacity.samplers : cached_capacity;
   native_descriptor_paging_ = indexed && REXCVAR_GET(gta4_native_descriptor_paging) &&
                               indexed_capacity.maximum_page_count >= NativeFrameContextRing::kSlotCount;
   native_descriptor_maximum_page_count_ = indexed
@@ -15926,6 +15956,31 @@ bool Gta4NativeGraphicsSystem::CreateNativeDescriptors() {
     }
   }
 
+  // The cached backend binds every heap as a fixed-size array and every stage
+  // sees all of them, so that sum is a device limit rather than a free choice.
+  // Report it next to the device's numbers so an overrun is visible before any
+  // pipeline is refused (the Mali blob then fails every draw and says nothing).
+  if (!indexed) {
+    const uint32_t cached_images =
+        kNativeIndexedImageDescriptorSetCount * native_descriptor_capacity_;
+    const uint32_t cached_samplers = native_sampler_descriptor_capacity_;
+    const uint32_t cached_storage_buffers = 1;
+    const uint32_t cached_resources = cached_images + cached_samplers + cached_storage_buffers;
+    REXLOG_INFO(
+        "gta4-native-descriptors: cached layout per stage images={} samplers={} "
+        "storage-buffers={} total={} driver per-stage resources={} images={} samplers={} "
+        "per-set images={} samplers={} fits={}",
+        cached_images, cached_samplers, cached_storage_buffers, cached_resources,
+        limits.maxPerStageResources, limits.maxPerStageDescriptorSampledImages,
+        limits.maxPerStageDescriptorSamplers, limits.maxDescriptorSetSampledImages,
+        limits.maxDescriptorSetSamplers,
+        cached_resources <= limits.maxPerStageResources &&
+            cached_images <= limits.maxPerStageDescriptorSampledImages &&
+            cached_samplers <= limits.maxPerStageDescriptorSamplers &&
+            cached_images <= limits.maxDescriptorSetSampledImages &&
+            cached_samplers <= limits.maxDescriptorSetSamplers);
+  }
+
   // A live indexed table may later prove too small for the number of native
   // image lifetimes. Keep the original compact tuple-cache layouts available
   // so that transition does not allocate one full bindless array for every
@@ -15935,7 +15990,7 @@ bool Gta4NativeGraphicsSystem::CreateNativeDescriptors() {
     for (uint32_t index = 0; index < kDrawTextureBindingCount; ++index) {
       VkDescriptorSetLayoutBinding& binding = bindings[index];
       binding.binding = NativeMergedTextureBinding(index);
-      binding.descriptorCount = kShaderTextureCount;
+      binding.descriptorCount = cached_capacity;
       binding.descriptorType = index < kNativeIndexedImageDescriptorSetCount
                                    ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
                                    : VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -19928,7 +19983,9 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
       writes[set].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       writes[set].dstSet = descriptor_sets[0];
       writes[set].dstBinding = NativeMergedTextureBinding(set);
-      writes[set].descriptorCount = kShaderTextureCount;
+      writes[set].descriptorCount = set < kNativeIndexedImageDescriptorSetCount
+                                        ? native_descriptor_capacity_
+                                        : native_sampler_descriptor_capacity_;
       writes[set].descriptorType =
           set < 4 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER;
       writes[set].pImageInfo = descriptor_infos[set].data();
@@ -22189,7 +22246,7 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
   if (alpha_test_requested && use_late_module) {
     specialization_value = PackAlphaTestSpecialization(fixed_function_state.alpha_function);
   }
-  if (state.pixel_shader_resource) {
+  if (state.pixel_shader_resource && REXCVAR_GET(gta4_native_pipeline_semantics_log)) {
     const std::string_view diagnostic_category =
         ClassifyTranslucentDiagnosticShader(selected_pixel.filename);
     if (fixed_function_state.alpha_test_enable || !diagnostic_category.empty()) {
@@ -22384,6 +22441,35 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
         static_cast<uint64_t>(static_cast<int64_t>(pipeline_result)));
   }
   if (pipeline_result != VK_SUCCESS) {
+    // Drivers such as the Mali blob return a bare VkResult here and print
+    // nothing to logcat, so report the state a driver is allowed to refuse
+    // together with the descriptor budget the layout asks for.
+    static std::atomic<uint32_t> pipeline_create_failure_count{0};
+    const uint32_t failure_index = ++pipeline_create_failure_count;
+    if (failure_index <= 16 || !(failure_index % 512)) {
+      const auto& device_limits = vulkan_device->properties();
+      REXLOG_WARN(
+          "gta4-native-diag: pipeline-create failed result={} #{} primitive={} target={}x{} "
+          "samples={} topology={} restart={} vs={:016X} ps={:016X} "
+          "color-formats={:X},{:X},{:X},{:X} depth-format={:X} "
+          "blend=0x{:X} depth={}/{}/{} stencil={} cull={} polygon={} clamp={} n1to1={} "
+          "limits-per-stage: resources={} images={} samplers={} "
+          "limits-per-set: images={} samplers={} "
+          "layout-request: images={} samplers={} storage-buffers={}",
+          static_cast<int32_t>(pipeline_result), failure_index, primitive_type, target.width,
+          target.height, uint32_t(target.samples), uint32_t(key.topology),
+          key.primitive_restart_enable, key.vertex_shader_hash, key.pixel_shader_hash,
+          uint32_t(key.color_formats[0]), uint32_t(key.color_formats[1]),
+          uint32_t(key.color_formats[2]), uint32_t(key.color_formats[3]),
+          uint32_t(key.depth_format), key.blend_enable_mask, key.depth_enable, key.depth_function,
+          key.depth_write_enable, key.stencil_enable, key.cull_mode, key.polygon_mode,
+          key.depth_clamp_enable, key.negative_one_to_one_clip_space,
+          device_limits.maxPerStageResources, device_limits.maxPerStageDescriptorSampledImages,
+          device_limits.maxPerStageDescriptorSamplers, device_limits.maxDescriptorSetSampledImages,
+          device_limits.maxDescriptorSetSamplers,
+          kNativeIndexedImageDescriptorSetCount * native_descriptor_capacity_,
+          native_sampler_descriptor_capacity_, 1u);
+    }
     return reject("vk-create-pipeline");
   }
 
@@ -35570,7 +35656,8 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       const auto* setup = semantic_light_setup_lineage_.Find(command.lighting.occurrence_id);
       const NativeLightingAttachmentLineage current = capture_attachment_lineage(target.depth_surface);
       semantic_lineage_ready = semantic_light_setup_lineage_.Matches(command.lighting, current);
-      if (!semantic_lineage_ready || IsArtificialLightTraceEnabled()) {
+      if (IsArtificialLightTraceEnabled() ||
+          (!semantic_lineage_ready && REXCVAR_GET(gta4_native_light_lineage_log))) {
         REXLOG_INFO(
             "gta4-native-light-lineage: point=semantic-contribution frame={} cmd={} "
             "occurrence={} view-id={} result={} setup-found={} depth-serial={} stencil-serial={} "
