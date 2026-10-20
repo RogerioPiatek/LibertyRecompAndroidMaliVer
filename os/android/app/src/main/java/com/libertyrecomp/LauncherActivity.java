@@ -489,8 +489,9 @@ public class LauncherActivity extends Activity {
     private static final GraphicsSetting[] GRAPHICS_SETTINGS = {
             new GraphicsSetting("Resolution", "Lower is faster",
                     new String[] {"gta4_output_height_cap"},
-                    new String[] {"Default", "540p", "720p", "900p", "1080p", "Screen resolution"},
-                    new String[] {"540", "720", "900", "1080", "0"}),
+                    new String[] {"Default", "360p", "480p", "540p", "720p", "900p", "1080p",
+                            "Screen resolution"},
+                    new String[] {"360", "480", "540", "720", "900", "1080", "0"}),
             new GraphicsSetting("Upscaler", "FSR 1 renders below the resolution and sharpens",
                     new String[] {"gta4_native_upscaler"},
                     new String[] {"Default", "Off", "FSR 1"},
@@ -521,6 +522,25 @@ public class LauncherActivity extends Activity {
                     new String[] {"gta4_shadow_map_base_size"},
                     new String[] {"Default", "Console", "High"},
                     new String[] {"256", "512"}),
+            new GraphicsSetting("Scene MSAA", "Off is the cheapest; 4x MSAA costs the most",
+                    new String[] {"gta4_native_msaa"},
+                    new String[] {"Default", "Off", "2x", "4x"},
+                    new String[] {"off", "2x", "4x"}),
+            new GraphicsSetting("Sun shadows", "Redraw rate; skipped frames keep the last map",
+                    new String[] {"gta4_native_shadow_interval"},
+                    new String[] {"Default", "Every frame", "Every 2 frames", "Every 3 frames",
+                            "Off"},
+                    new String[] {"1", "2", "3", "0"}),
+            new GraphicsSetting("Reflections", "Water and environment capture rate",
+                    new String[] {"gta4_native_water_reflection_interval",
+                            "gta4_native_environment_reflection_interval"},
+                    new String[] {"Default", "Every frame", "Every 2 frames", "Every 3 frames",
+                            "Off"},
+                    new String[] {"1", "2", "3", "0"}),
+            new GraphicsSetting("Lazy resolves", "Skips resolves nothing has read recently",
+                    new String[] {"gta4_native_lazy_resolves"},
+                    new String[] {"Default", "On", "Off"},
+                    new String[] {"true", "false"}),
             new GraphicsSetting("Motion blur", "Makes 30 FPS look smoother",
                     new String[] {"gta4_motion_blur"},
                     new String[] {"Default", "On", "Off"},
@@ -628,6 +648,17 @@ public class LauncherActivity extends Activity {
         // react to changes the user makes afterwards.
         card.post(() -> mGraphicsLoading = false);
 
+        Button preset = button("Performance preset", false);
+        preset.setOnClickListener(v -> {
+            applyPerformancePreset();
+            markSettingsChanged();
+            toast("Performance preset applied - press Save changes");
+        });
+        LinearLayout.LayoutParams presetParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
+        presetParams.topMargin = dp(12);
+        card.addView(preset, presetParams);
+
         Button reset = button("Reset to default", false);
         reset.setOnClickListener(v -> {
             mGraphicsLoading = true;
@@ -641,6 +672,45 @@ public class LauncherActivity extends Activity {
         resetParams.topMargin = dp(12);
         card.addView(reset, resetParams);
         return card;
+    }
+
+    // One-click starting point for low-end GPUs (Mali-G52 class): cut the
+    // number of per-frame passes first, since that is what the draw census
+    // shows dominating the frame.
+    private void applyPerformancePreset() {
+        mGraphicsLoading = true;
+        selectGraphicsValue("gta4_output_height_cap", "540");
+        selectGraphicsValue("gta4_native_anti_aliasing", "off");
+        selectGraphicsValue("gta4_native_msaa", "off");
+        selectGraphicsValue("gta4_frame_limit", "30");
+        selectGraphicsValue("gta4_draw_distance_scale", "0.6");
+        selectGraphicsValue("gta4_traffic_density_scale", "0.2");
+        selectGraphicsValue("gta4_native_shadow_interval", "2");
+        selectGraphicsValue("gta4_native_water_reflection_interval", "2");
+        selectGraphicsValue("gta4_native_lazy_resolves", "true");
+        mGraphicsLoading = false;
+    }
+
+    private void selectGraphicsValue(String cvar, String value) {
+        for (int i = 0; i < GRAPHICS_SETTINGS.length; ++i) {
+            GraphicsSetting setting = GRAPHICS_SETTINGS[i];
+            boolean owns = false;
+            for (String name : setting.cvars) {
+                if (name.equals(cvar)) {
+                    owns = true;
+                    break;
+                }
+            }
+            if (!owns) continue;
+            for (int v = 0; v < setting.values.length; ++v) {
+                if (!setting.values[v].equals(value)) continue;
+                Spinner spinner = mGraphicsSpinners[i];
+                if (spinner != null) spinner.setSelection(v + 1, false);
+                mGraphicsPositions[i] = v + 1;
+                return;
+            }
+            return;
+        }
     }
 
     private ArrayAdapter<String> graphicsAdapter(String[] choices) {

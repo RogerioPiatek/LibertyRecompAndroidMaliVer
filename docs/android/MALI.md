@@ -116,3 +116,48 @@ These are open questions, not known bugs:
 
 When reporting a problem, attach `last_launch.txt` and, if the game started, a debug log from
 **Play (Debug Log)** on the launcher.
+
+## Frame-rate tuning on Mali
+
+The draw census (`gta4-draw-census`) is the quickest way to see where a Mali frame goes. A busy
+Liberty City view is ~1400-2500 commands per frame on a Mali-G52 MC2, split roughly as:
+
+| Pass | Target | Draws (typical) |
+| --- | --- | --- |
+| Main scene | 1200x540 | ~800-1450 |
+| Sun shadow map | 1280x1280 depth | ~650-720 (only on frames that redraw it) |
+| Shadow cascade | 256x256 depth | ~130-180 |
+| Water reflection | 320x180 | ~40-215 |
+| Environment reflection | 128x128 depth | ~90-150 |
+
+Everything is draw-bound before it is pixel-bound on this class of GPU, so the launcher's
+**Performance preset** cuts whole passes first and only then resolution:
+
+- `--gta4_native_shadow_interval=2` - redraw the sun shadow map every second frame. Skipped frames
+  keep the previous map, so fast movers' shadows lag by one frame. `0` removes sun shadows.
+  The renderer recognises the pass geometrically (depth-only, square, 512+), so this works without
+  the GPU profiler attached.
+- `--gta4_native_water_reflection_interval=2` and
+  `--gta4_native_environment_reflection_interval=2` - capture reflections every second frame.
+  `0` keeps the cleared texture (no reflection).
+- `--gta4_native_lazy_resolves=true` - skip resolves into textures nothing has read for 120 frames
+  (the first frame that reads one sees a stale copy).
+- `--gta4_output_height_cap=360|480|540|720` - internal render height; the presenter stretches the
+  result to the display. `360` is 2.25x fewer pixels than `540` and is the cheapest option the
+  launcher offers.
+- `--gta4_native_msaa=off` - the scene default is 4x MSAA. Note that the launcher's
+  **Anti-aliasing** dropdown does not change MSAA: `off` there keeps the legacy 4x scene MSAA, while
+  `fxaa`/`smaa` drop the scene to 1x and add a full-screen post pass. Use the **Scene MSAA** setting
+  to control it directly.
+
+To find out whether a given build is CPU-bound (recorder) or GPU/present-bound, add
+`--gta4_native_frame_timeline=true` to `args.txt`. Every 8 frames the renderer logs
+`frame-timeline:` with microsecond offsets from the guest present:
+
+```
+frame-timeline: 1234:<guest_ns> +worker,+handoff,+recorder,+submit,+publish
+```
+
+`+submit - +recorder` is the time spent recording the frame on the CPU; `+publish - +submit` is the
+queue submit plus the swapchain acquire/present wait. Whichever dominates is the bottleneck:
+command recording points at the per-draw path, the present tail points at the GPU.
