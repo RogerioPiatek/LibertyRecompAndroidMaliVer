@@ -271,6 +271,13 @@ REXCVAR_DEFINE_BOOL(gta4_native_frame_timeline, false, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_UINT32(gta4_native_shadow_min_indices, 0, "GTA IV/Graphics/Shadows",
                       "Skip indexed draws with fewer indices than this in the shadow map passes "
                       "(0 = draw everything)");
+// TEMP (perf investigation): where the recorder thread spends the frame. Binds
+// the CPU recorder for every recorded frame and logs the top operations by self
+// time every 120 frames. Two clock reads per instrumented scope, so this is a
+// diagnostic switch, not a shipping default.
+REXCVAR_DEFINE_BOOL(gta4_native_cpu_report, false, "GTA IV/Diagnostics",
+                    "Log a per-op CPU breakdown of the recorder thread every 120 frames "
+                    "(also enabled by gta4_native_frame_timeline)");
 REXCVAR_DEFINE_BOOL(gta4_native_water_occlusion_queries, false, "GTA IV/Graphics/Reflections",
                     "Occlusion queries around scene water draws (diagnostic only: their result "
                     "no longer changes the water reflection)");
@@ -774,6 +781,45 @@ bool CachedDiagnosticsEnabled(rex::diagnostics::Category category) noexcept {
   return (mask >> uint32_t(category)) & 1u;
 }
 namespace gpu_flight = rex::diagnostics::gpu_flight;
+
+// TEMP (perf investigation): one line per 120 frames naming where a render
+// thread spent its time. `self` excludes instrumented children on the same
+// thread, which is what identifies the real leaf cost; `inclusive` is printed
+// next to it so nested sections (record-indexed over record-primitive) stay
+// readable. Calls per frame make an unexpected count obvious.
+void LogNativeCpuBreakdown(const char* tag, const profile::CpuFrameData& data,
+                           uint32_t frames) {
+  if (!frames || data.end <= data.begin) return;
+  const double ms_per_tick = 1000.0 / double(rex::chrono::Clock::QueryHostTickFrequency());
+  const double divisor = double(frames);
+  std::vector<size_t> cells;
+  cells.reserve(profile::kCpuCellCount);
+  for (size_t cell = 0; cell < profile::kCpuCellCount; ++cell) cells.push_back(cell);
+  std::array<uint64_t, profile::kCpuCellCount> self{};
+  std::array<uint64_t, profile::kCpuCellCount> inclusive{};
+  std::array<uint64_t, profile::kCpuCellCount> calls{};
+  for (const profile::CpuMeasurement& measurement : data.measurements) {
+    const size_t cell =
+        size_t(measurement.phase) * profile::kCpuOpCount + size_t(measurement.op);
+    self[cell] = measurement.self_ticks;
+    inclusive[cell] = measurement.inclusive_ticks;
+    calls[cell] = measurement.calls;
+  }
+  std::erase_if(cells, [&](size_t cell) { return calls[cell] == 0; });
+  std::sort(cells.begin(), cells.end(),
+            [&](size_t left, size_t right) { return self[left] > self[right]; });
+  std::string report;
+  for (size_t i = 0; i < cells.size() && i < 12; ++i) {
+    const size_t cell = cells[i];
+    report += fmt::format(" {}={:.1f}/{:.1f}({:.0f})",
+                          profile::CpuOpName(profile::CpuOp(cell % profile::kCpuOpCount)),
+                          double(self[cell]) * ms_per_tick / divisor,
+                          double(inclusive[cell]) * ms_per_tick / divisor,
+                          double(calls[cell]) / divisor);
+  }
+  REXLOG_WARN("record-cpu/{}: wall={:.1f}ms self/inclusive(calls){}", tag,
+              double(data.end - data.begin) * ms_per_tick / divisor, report);
+}
 
 bool IsNativeFlightVerboseLoggingEnabled() {
   return CachedDiagnosticsEnabled(rex::diagnostics::Category::kNativeTrace) ||
@@ -6149,6 +6195,25 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
   std::vector<std::pair<RenderPhase, uint32_t>> render_phase_stack;
   uint64_t startup_texture_lock_count = 0;
   bool startup_present_follows_texture_lock_flush = false;
+  // TEMP (perf investigation): the producer side of the pipeline. The recorder
+  // report says what the Vulkan thread costs; this one says what assembling the
+  // frame costs (texture capture, constants, scans) before the handoff.
+  std::optional<profile::CpuRecorderBinding> worker_cpu_binding;
+  const bool worker_cpu_report =
+      REXCVAR_GET(gta4_native_cpu_report) || REXCVAR_GET(gta4_native_frame_timeline);
+  if (worker_cpu_report) {
+    worker_cpu_report_recorder_.Begin(profile::CpuTick());
+    worker_cpu_binding.emplace(&worker_cpu_report_recorder_);
+  }
+  uint32_t worker_cpu_frames = 0;
+  const auto report_worker_cpu = [&] {
+    if (!worker_cpu_report || ++worker_cpu_frames < 120) return;
+    const uint32_t frames = worker_cpu_frames;
+    worker_cpu_frames = 0;
+    const profile::CpuFrameData data = worker_cpu_report_recorder_.Finish(profile::CpuTick());
+    worker_cpu_report_recorder_.Begin(profile::CpuTick());
+    LogNativeCpuBreakdown("worker", data, frames);
+  };
   auto log_frame_batch = [this](std::string_view boundary, const NativeCommand& boundary_command,
                                 uint32_t submitted_frame, size_t queued_after_boundary) {
 #if REX_PLATFORM_ANDROID
@@ -6816,6 +6881,7 @@ void Gta4NativeGraphicsSystem::RenderWorkerMain() {
           recording_environmental_data_by_device_ = environmental_data_by_device_;
           assembly_modern_frame_pending_ = false;
           log_frame_batch("present", command, present.submitted_frame, queued_after_pop);
+          report_worker_cpu();
 #if REX_PLATFORM_ANDROID
           // TEMP: pipeline stall telemetry (perf investigation).
           if (++pipeline_report_frames_ == 120) {
@@ -29300,6 +29366,54 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     bool trace_stages, uint32_t trace_sequence, bool force_content_probe) {
   const profile::CpuPhaseScope profile_phase(profile::CpuPhase::kRecording);
   const profile::CpuScope profile_scope(profile::CpuOp::kRecordFrame);
+  // TEMP (perf investigation): publish where the recorder thread spends its
+  // frame. The draw path is already sprinkled with profile::CpuScope sites, so
+  // binding a recorder for the whole frame turns them into a real breakdown
+  // without touching every call site.
+  std::optional<profile::CpuRecorderBinding> cpu_report_binding;
+  const bool cpu_report_enabled =
+      (REXCVAR_GET(gta4_native_cpu_report) || REXCVAR_GET(gta4_native_frame_timeline)) &&
+      !profile::current_cpu_recorder;
+  if (cpu_report_enabled) {
+    cpu_report_recorder_.Begin(profile::CpuTick());
+    cpu_report_binding.emplace(&cpu_report_recorder_);
+  }
+  const auto cpu_report_exit = MakeScopeExit([this, cpu_report_enabled] {
+    if (!cpu_report_enabled) return;
+    const profile::CpuFrameData data = cpu_report_recorder_.Finish(profile::CpuTick());
+    struct Accumulator {
+      std::array<uint64_t, profile::kCpuCellCount> inclusive{};
+      std::array<uint64_t, profile::kCpuCellCount> self{};
+      std::array<uint64_t, profile::kCpuCellCount> calls{};
+      uint64_t wall_ticks = 0;
+      uint32_t frames = 0;
+    };
+    static Accumulator accumulator;  // One recorder thread.
+    accumulator.wall_ticks += data.end - data.begin;
+    for (const profile::CpuMeasurement& measurement : data.measurements) {
+      const size_t cell =
+          size_t(measurement.phase) * profile::kCpuOpCount + size_t(measurement.op);
+      accumulator.inclusive[cell] += measurement.inclusive_ticks;
+      accumulator.self[cell] += measurement.self_ticks;
+      accumulator.calls[cell] += measurement.calls;
+    }
+    if (++accumulator.frames < 120) return;
+    profile::CpuFrameData summary;
+    summary.begin = 0;
+    summary.end = accumulator.wall_ticks;
+    for (size_t cell = 0; cell < profile::kCpuCellCount; ++cell) {
+      if (!accumulator.calls[cell]) continue;
+      profile::CpuMeasurement measurement;
+      measurement.phase = profile::CpuPhase(cell / profile::kCpuOpCount);
+      measurement.op = profile::CpuOp(cell % profile::kCpuOpCount);
+      measurement.calls = accumulator.calls[cell];
+      measurement.self_ticks = accumulator.self[cell];
+      measurement.inclusive_ticks = accumulator.inclusive[cell];
+      summary.measurements.push_back(measurement);
+    }
+    LogNativeCpuBreakdown("recorder", summary, accumulator.frames);
+    accumulator = {};
+  });
 
   SCOPE_profile_cpu_i("gpu", "GTA4 Native RecordNativeFrame");
   BeginBulbFrame(submitted_frame);

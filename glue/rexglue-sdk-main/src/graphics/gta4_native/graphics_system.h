@@ -2406,6 +2406,13 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   NativeTranslucentQueryState secondary_translucent_query_state_;
   NativeGpuProfileState native_gpu_profile_state_;
   profile::CpuRecorder native_cpu_recorder_;
+  // Diagnostic recorder bound by RecordNativeFrame when gta4_native_cpu_report
+  // (or gta4_native_frame_timeline) is on. Kept separate from the profiler's so
+  // the two never fight over the thread-local binding.
+  profile::CpuRecorder cpu_report_recorder_;
+  // Same, for the producer thread (frame assembly), reported at its present
+  // boundary. Covers the whole 120-frame window, so its cells are aggregates.
+  profile::CpuRecorder worker_cpu_report_recorder_;
   profile::TransportSummary native_profile_transport_;
   uint64_t native_profile_clock_probe_ticks_ = UINT64_MAX;
   struct NativeMemoryProfileState {

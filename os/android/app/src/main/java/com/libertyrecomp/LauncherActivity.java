@@ -541,6 +541,12 @@ public class LauncherActivity extends Activity {
                     new String[] {"gta4_native_lazy_resolves"},
                     new String[] {"Default", "On", "Off"},
                     new String[] {"true", "false"}),
+            new GraphicsSetting("Vertex cache sort",
+                    "Reorders scene triangles for the GPU vertex cache. It keeps a whole CPU core "
+                            + "busy in heavy scenes; on low-end phones turning it off is faster",
+                    new String[] {"gta4_native_vertex_cache_order"},
+                    new String[] {"Default", "On", "Off"},
+                    new String[] {"true", "false"}),
             new GraphicsSetting("Motion blur", "Makes 30 FPS look smoother",
                     new String[] {"gta4_motion_blur"},
                     new String[] {"Default", "On", "Off"},
@@ -650,7 +656,7 @@ public class LauncherActivity extends Activity {
 
         Button preset = button("Performance preset", false);
         preset.setOnClickListener(v -> {
-            applyPerformancePreset();
+            applyPerformancePreset(false);
             markSettingsChanged();
             toast("Performance preset applied - press Save changes");
         });
@@ -658,6 +664,17 @@ public class LauncherActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
         presetParams.topMargin = dp(12);
         card.addView(preset, presetParams);
+
+        Button maxPreset = button("Maximum performance preset (360p)", false);
+        maxPreset.setOnClickListener(v -> {
+            applyPerformancePreset(true);
+            markSettingsChanged();
+            toast("Maximum performance preset applied - press Save changes");
+        });
+        LinearLayout.LayoutParams maxPresetParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
+        maxPresetParams.topMargin = dp(12);
+        card.addView(maxPreset, maxPresetParams);
 
         Button reset = button("Reset to default", false);
         reset.setOnClickListener(v -> {
@@ -676,18 +693,20 @@ public class LauncherActivity extends Activity {
 
     // One-click starting point for low-end GPUs (Mali-G52 class): cut the
     // number of per-frame passes first, since that is what the draw census
-    // shows dominating the frame.
-    private void applyPerformancePreset() {
+    // shows dominating the frame. `maximum` also drops the render resolution
+    // and the every-frame passes that only refine detail.
+    private void applyPerformancePreset(boolean maximum) {
         mGraphicsLoading = true;
-        selectGraphicsValue("gta4_output_height_cap", "540");
+        selectGraphicsValue("gta4_output_height_cap", maximum ? "360" : "540");
         selectGraphicsValue("gta4_native_anti_aliasing", "off");
         selectGraphicsValue("gta4_native_msaa", "off");
         selectGraphicsValue("gta4_frame_limit", "30");
         selectGraphicsValue("gta4_draw_distance_scale", "0.6");
         selectGraphicsValue("gta4_traffic_density_scale", "0.2");
-        selectGraphicsValue("gta4_native_shadow_interval", "2");
-        selectGraphicsValue("gta4_native_water_reflection_interval", "2");
+        selectGraphicsValue("gta4_native_shadow_interval", maximum ? "3" : "2");
+        selectGraphicsValue("gta4_native_water_reflection_interval", maximum ? "3" : "2");
         selectGraphicsValue("gta4_native_lazy_resolves", "true");
+        selectGraphicsValue("gta4_native_vertex_cache_order", "false");
         mGraphicsLoading = false;
     }
 

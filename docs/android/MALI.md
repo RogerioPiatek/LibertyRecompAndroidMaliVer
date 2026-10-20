@@ -142,6 +142,10 @@ Everything is draw-bound before it is pixel-bound on this class of GPU, so the l
   `0` keeps the cleared texture (no reflection).
 - `--gta4_native_lazy_resolves=true` - skip resolves into textures nothing has read for 120 frames
   (the first frame that reads one sees a stale copy).
+- `--gta4_native_vertex_cache_order=false` - stop reordering scene triangles for the GPU vertex
+  cache. That pass costs a full CPU core when the scene streams (600k-800k indices per frame on a
+  busy view) and buys little on a Mali-G52's small post-transform cache, so on a CPU-bound build
+  turning it off is the cheap win.
 - `--gta4_output_height_cap=360|480|540|720` - internal render height; the presenter stretches the
   result to the display. `360` is 2.25x fewer pixels than `540` and is the cheapest option the
   launcher offers.
@@ -149,6 +153,10 @@ Everything is draw-bound before it is pixel-bound on this class of GPU, so the l
   **Anti-aliasing** dropdown does not change MSAA: `off` there keeps the legacy 4x scene MSAA, while
   `fxaa`/`smaa` drop the scene to 1x and add a full-screen post pass. Use the **Scene MSAA** setting
   to control it directly.
+
+The launcher has two presets: **Performance preset** (540p, passes every second frame) and
+**Maximum performance preset (360p)**, which also redraws shadows/reflections every third frame and
+turns the vertex-cache sort off.
 
 To find out whether a given build is CPU-bound (recorder) or GPU/present-bound, add
 `--gta4_native_frame_timeline=true` to `args.txt`. Every 8 frames the renderer logs
@@ -161,3 +169,15 @@ frame-timeline: 1234:<guest_ns> +worker,+handoff,+recorder,+submit,+publish
 `+submit - +recorder` is the time spent recording the frame on the CPU; `+publish - +submit` is the
 queue submit plus the swapchain acquire/present wait. Whichever dominates is the bottleneck:
 command recording points at the per-draw path, the present tail points at the GPU.
+
+`frame-timeline` (or `--gta4_native_cpu_report=true` on its own) also makes both render threads
+publish a breakdown, once per 120 frames:
+
+```
+record-cpu/recorder: wall=71.2ms self/inclusive(calls) vk-bind=18.4/18.4(812) ...
+record-cpu/worker:   wall=88.7ms self/inclusive(calls) texture-image-lookup=22.1/41.0(904) ...
+```
+
+Each entry is `self/inclusive(calls-per-frame)` in milliseconds. `self` is the leaf cost, so it
+names the real hotspot; `inclusive` keeps nested sections readable; `wall` is the whole thread time
+per frame, so `wall` minus the sections is the unimplemented remainder (idle waits included).
