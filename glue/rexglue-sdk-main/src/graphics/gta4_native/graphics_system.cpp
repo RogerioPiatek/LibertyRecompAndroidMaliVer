@@ -208,6 +208,9 @@ REXCVAR_DEFINE_UINT32(gta4_native_descriptor_capacity,
                       "descriptor set layout); lowers the per-stage resource budget for drivers "
                       "with a small VkPhysicalDeviceLimits budget")
     .range(1, rex::graphics::gta4_native::kTextureStageCount);
+REXCVAR_DEFINE_BOOL(gta4_native_pipeline_cache, true, "GTA IV/Diagnostics",
+                    "Create and share a VkPipelineCache; disable to test a driver that refuses "
+                    "pipelines when the cache is used from the compiler thread");
 REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_trigger, 0, "GTA IV/Diagnostics",
                       "TEMP: changing this value starts one native profile capture");
 REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_delay_seconds, 0, "GTA IV/Diagnostics",
@@ -16902,6 +16905,12 @@ bool Gta4NativeGraphicsSystem::InitializeNativeRendererObjects() {
 }
 
 bool Gta4NativeGraphicsSystem::InitializeNativePipelineCache() {
+  if (!REXCVAR_GET(gta4_native_pipeline_cache)) {
+    // Diagnostic: some blobs (Mali r49 among them) are only obliged to
+    // serialise vkCreateGraphicsPipelines calls that share a cache when the
+    // application does; dropping the cache removes the shared object entirely.
+    return true;
+  }
   if (native_pipeline_cache_) {
     return true;
   }
