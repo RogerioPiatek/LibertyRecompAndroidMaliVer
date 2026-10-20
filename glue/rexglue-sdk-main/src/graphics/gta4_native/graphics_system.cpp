@@ -202,12 +202,12 @@ REXCVAR_DEFINE_BOOL(gta4_native_light_lineage_log, false, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_BOOL(gta4_native_strip_descriptor_indexing_extension, true, "GTA IV/Diagnostics",
                     "Drop the SPV_EXT_descriptor_indexing declaration once the runtime descriptor "
                     "arrays have been rewritten to fixed-size arrays");
-REXCVAR_DEFINE_UINT32(gta4_native_descriptor_capacity, kTextureStageCount,
-                      "GTA IV/Diagnostics",
+REXCVAR_DEFINE_UINT32(gta4_native_descriptor_capacity,
+                      rex::graphics::gta4_native::kTextureStageCount, "GTA IV/Diagnostics",
                       "Descriptor heaps bound by the cached backend (shader array size and "
                       "descriptor set layout); lowers the per-stage resource budget for drivers "
                       "with a small VkPhysicalDeviceLimits budget")
-    .range(1, kTextureStageCount);
+    .range(1, rex::graphics::gta4_native::kTextureStageCount);
 REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_trigger, 0, "GTA IV/Diagnostics",
                       "TEMP: changing this value starts one native profile capture");
 REXCVAR_DEFINE_UINT32(gta4_profile_native_capture_delay_seconds, 0, "GTA IV/Diagnostics",
@@ -22451,22 +22451,23 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
       REXLOG_WARN(
           "gta4-native-diag: pipeline-create failed result={} #{} primitive={} target={}x{} "
           "samples={} topology={} restart={} vs={:016X} ps={:016X} "
-          "color-formats={:X},{:X},{:X},{:X} depth-format={:X} "
+          "color-formats={:X},{:X},{:X},{:X} attachments={} depth-format={:X} "
           "blend=0x{:X} depth={}/{}/{} stencil={} cull={} polygon={} clamp={} n1to1={} "
-          "limits-per-stage: resources={} images={} samplers={} "
-          "limits-per-set: images={} samplers={} "
+          "limits: per-stage-resources={} per-stage-images={} per-stage-samplers={} "
+          "per-set-images={} per-set-samplers={} combined-output={} max-color-attachments={} "
           "layout-request: images={} samplers={} storage-buffers={}",
           static_cast<int32_t>(pipeline_result), failure_index, primitive_type, target.width,
           target.height, uint32_t(target.samples), uint32_t(key.topology),
           key.primitive_restart_enable, key.vertex_shader_hash, key.pixel_shader_hash,
           uint32_t(key.color_formats[0]), uint32_t(key.color_formats[1]),
-          uint32_t(key.color_formats[2]), uint32_t(key.color_formats[3]),
+          uint32_t(key.color_formats[2]), uint32_t(key.color_formats[3]), color_attachment_count,
           uint32_t(key.depth_format), key.blend_enable_mask, key.depth_enable, key.depth_function,
           key.depth_write_enable, key.stencil_enable, key.cull_mode, key.polygon_mode,
           key.depth_clamp_enable, key.negative_one_to_one_clip_space,
           device_limits.maxPerStageResources, device_limits.maxPerStageDescriptorSampledImages,
           device_limits.maxPerStageDescriptorSamplers, device_limits.maxDescriptorSetSampledImages,
           device_limits.maxDescriptorSetSamplers,
+          device_limits.maxFragmentCombinedOutputResources, device_limits.maxColorAttachments,
           kNativeIndexedImageDescriptorSetCount * native_descriptor_capacity_,
           native_sampler_descriptor_capacity_, 1u);
     }
